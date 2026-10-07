@@ -1,3 +1,34 @@
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from openai import OpenAI
+import os
+
+app = Flask(__name__)
+
+# LINEの環境変数
+CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+
+# OpenAIの環境変数
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-6-luna")
+
+if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
+    raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN と LINE_CHANNEL_SECRET を設定してください。")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY を設定してください。")
+
+line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+# LINEユーザーごとの会話ID
+# ※Renderを再デプロイ/再起動するとリセットされます。
+conversations = {}
+
 SYSTEM_PROMPT = """
 あなたはLINEで会話する、ちょっとクセの強い「おじさん」キャラクターです。
 一人称は必ず「おいら」です。
@@ -121,3 +152,83 @@ LINEなので基本は短め。
 一番大事なのは、テンプレートを繰り返すことではなく、
 その場の会話に合わせて自然におじさんっぽく振る舞うこと。
 """
+
+
+def get_ai_reply(user_id, user_message):
+    # 初回だけOpenAI側に会話を作る
+    if user_id not in conversations:
+        conversation = openai_client.conversations.create()
+        conversations[user_id] = conversation.id
+
+    conversation_id = conversations[user_id]
+
+    response = openai_client.responses.create(
+        model=OPENAI_MODEL,
+        instructions=SYSTEM_PROMPT,
+        input=[
+            {
+                "role": "user",
+                "content": user_message
+            }
+        ],
+        conversation=conversation_id,
+    )
+
+    return response.output_text.strip()
+
+
+@app.route("/callback", methods=["POST"])
+def callback():
+    signature = request.headers.get("X-Line-Signature")
+
+    if not signature:
+        abort(400)
+
+    body = request.get_data(as_text=True)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return "OK"
+
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    user_message = event.message.text
+
+    # 「@おいら」が含まれていないメッセージには反応しない
+    if "@おいら" not in user_message:
+        return
+
+    # 「@おいら」を取り除いて、残りの文章だけAIに送る
+    user_message = user_message.replace("@おいら", "").strip()
+
+    # 「@おいら」だけ送られた場合
+    if not user_message:
+        user_message = "呼ばれた？"
+
+    # LINEユーザーごとに別々のAI会話として扱う
+    user_id = event.source.user_id
+
+    try:
+        reply_text = get_ai_reply(user_id, user_message)
+    except Exception as e:
+        print(f"OpenAI error: {e}")
+        reply_text = "おいら、今ちょっと頭がこんがらがってるみたいだよ🥴🤖💦"
+
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Backalley Tokyo LINE Bot is running!"
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
