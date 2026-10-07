@@ -130,6 +130,17 @@ def callback():
 def handle_message(event):
     user_message = event.message.text
 
+    # 「@おいら」が含まれていないメッセージには反応しない
+    if "@おいら" not in user_message:
+        return
+
+    # 「@おいら」を取り除いて、残りの文章だけAIに送る
+    user_message = user_message.replace("@おいら", "").strip()
+
+    # 「@おいら」だけ送られた場合
+    if not user_message:
+        user_message = "呼ばれた？"
+
     # LINEユーザーごとに別々のAI会話として扱う
     user_id = event.source.user_id
 
